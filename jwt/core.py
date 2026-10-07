@@ -153,11 +153,17 @@ def b64url_decode(segment):
     not in the alphabet, and leftover bits that are not zero are all refused
     with :class:`SegmentDecodeError`.
     """
+    if len(segment) % 4 == 1:
+        raise SegmentDecodeError(
+            "base64url segment has an impossible length")
     accumulator = 0
     bits = 0
     output = bytearray()
     for character in segment:
-        value = _VALUES.get(character, 0)
+        if character not in _VALUES:
+            raise SegmentDecodeError(
+                "base64url segment contains a character outside the alphabet")
+        value = _VALUES[character]
         accumulator = (accumulator << 6) | value
         bits += 6
         if bits >= 8:
@@ -176,9 +182,10 @@ def split_token(token):
     if not isinstance(token, str):
         raise MalformedTokenError("token must be a string")
     segments = token.split(".")
-    if len(segments) < SEGMENT_COUNT:
+    if len(segments) != SEGMENT_COUNT or any(not segment
+                                             for segment in segments):
         raise MalformedTokenError("token must have %d segments" % SEGMENT_COUNT)
-    return tuple(segments[:SEGMENT_COUNT])
+    return tuple(segments)
 
 
 def decode_segment(segment):
@@ -188,9 +195,9 @@ def decode_segment(segment):
     try:
         document = json.loads(b64url_decode(segment).decode("utf-8"))
     except ValueError:
-        raise ClaimError("segment is not a readable JSON document")
+        raise SegmentDecodeError("segment is not a readable JSON document")
     if not isinstance(document, dict):
-        raise ClaimError("segment does not hold a JSON object")
+        raise SegmentDecodeError("segment does not hold a JSON object")
     return document
 
 
@@ -217,7 +224,7 @@ def _matches(value, shape):
         return (isinstance(value, list)
                 and all(_matches(item, shape[0]) for item in value))
     if shape is int:
-        return isinstance(value, int)
+        return isinstance(value, int) and not isinstance(value, bool)
     return isinstance(value, shape)
 
 
@@ -234,9 +241,9 @@ def check_window(claims, now, leeway=0):
     """Refuse a token whose validity window does not contain ``now``."""
     not_before = claims.get("nbf")
     expires_at = claims.get("exp")
-    if not_before is not None and now < not_before:
+    if not_before is not None and now < not_before - leeway:
         raise NotYetValidError("token is not valid before %d" % not_before)
-    if expires_at is not None and now > expires_at + leeway:
+    if expires_at is not None and now >= expires_at + leeway:
         raise ExpiredTokenError("token expired at %d" % expires_at)
 
 
@@ -253,7 +260,13 @@ def check_audience(claims, audience):
     if audience is None:
         return
     declared = claims.get("aud", [])
-    if audience not in declared:
+    if isinstance(declared, str):
+        covered = declared == audience
+    elif isinstance(declared, list):
+        covered = audience in declared
+    else:
+        covered = False
+    if not covered:
         raise AudienceMismatchError("token is not meant for %s" % audience)
 
 
